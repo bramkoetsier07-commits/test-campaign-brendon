@@ -1,15 +1,18 @@
 import os
 import time
 import pandas as pd
-import anthropic
+from openai import OpenAI, RateLimitError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INPUT_CSV = "leads_brendon.csv"          # CSV file you upload to the repo before running
+INPUT_CSV = "leads.csv"          # CSV file you upload to the repo before running
 OUTPUT_CSV = "leads_output.csv"  # Updated CSV written after the run
 COL_SCRAPE = "Scrape"            # Column S — scraped website text
 COL_OUTPUT = "Ps"                # Column T — personalized line output
-DELAY_BETWEEN_ROWS = 2           # Seconds between Claude API calls
-CLAUDE_MODEL = "claude-sonnet-4-6"
+GPT_MODEL = "gpt-5-mini"         # Confirmed model string from OpenAI docs
+MAX_WORKERS = 10                 # Number of parallel API calls (safe for Tier 1+)
+MAX_RETRIES = 4                  # Retries per row if rate limited
+SAVE_EVERY = 50                  # Save progress to CSV every N rows completed
 # ────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a cold email personalization transformer.
@@ -38,32 +41,46 @@ def build_user_prompt(scrape_text: str) -> str:
 Write the personalized line now."""
 
 
-def generate_line(client: anthropic.Anthropic, scrape_text: str) -> str:
-    message = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=100,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": build_user_prompt(scrape_text)}
-        ]
-    )
-    return message.content[0].text.strip()
+def generate_line(client: OpenAI, scrape_text: str) -> str:
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=GPT_MODEL,
+                max_tokens=100,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": build_user_prompt(scrape_text)}
+                ]
+            )
+            return response.choices[0].message.content.strip()
+        except RateLimitError:
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"  Rate limited — waiting {wait}s before retry...")
+            time.sleep(wait)
+    return "ERROR: rate limit exceeded after retries"
+
+
+def process_row(args):
+    idx, scrape_text, brand, client = args
+    try:
+        line = generate_line(client, scrape_text)
+        return idx, line, None
+    except Exception as e:
+        return idx, "ERROR", str(e)
 
 
 def main():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set.")
+        raise ValueError("OPENAI_API_KEY environment variable not set.")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
     df = pd.read_csv(INPUT_CSV)
 
-    # Make sure the output column exists
     if COL_OUTPUT not in df.columns:
         df[COL_OUTPUT] = ""
 
-    # Convert to string and strip whitespace so empty-check works cleanly
     df[COL_SCRAPE] = df[COL_SCRAPE].fillna("").astype(str).str.strip()
     df[COL_OUTPUT] = df[COL_OUTPUT].fillna("").astype(str).str.strip()
 
@@ -71,29 +88,41 @@ def main():
         (df[COL_SCRAPE] != "") & (df[COL_OUTPUT] == "")
     ].index.tolist()
 
-    print(f"Rows to process: {len(rows_to_process)}")
+    total = len(rows_to_process)
+    print(f"Rows to process: {total}")
+    print(f"Running {MAX_WORKERS} parallel workers — estimated time: ~{round(total / (MAX_WORKERS / 1.5) / 60)} min\n")
 
-    for i, idx in enumerate(rows_to_process):
-        scrape_text = df.at[idx, COL_SCRAPE]
-        brand = df.at[idx, "Brand"] if "Brand" in df.columns else f"Row {idx + 1}"
+    completed = 0
+    start_time = time.time()
 
-        print(f"[{i + 1}/{len(rows_to_process)}] Processing: {brand}")
+    tasks = [
+        (idx, df.at[idx, COL_SCRAPE], df.at[idx, "Brand"] if "Brand" in df.columns else f"Row {idx+1}", client)
+        for idx in rows_to_process
+    ]
 
-        try:
-            line = generate_line(client, scrape_text)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_row, task): task[0] for task in tasks}
+
+        for future in as_completed(futures):
+            idx, line, error = future.result()
             df.at[idx, COL_OUTPUT] = line
-            print(f"  => {line}")
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            df.at[idx, COL_OUTPUT] = "ERROR"
+            completed += 1
 
-        # Save after every row so progress is not lost if something fails mid-run
-        df.to_csv(OUTPUT_CSV, index=False)
+            if error:
+                print(f"[{completed}/{total}] Row {idx} ERROR: {error}")
+            else:
+                brand = df.at[idx, "Brand"] if "Brand" in df.columns else f"Row {idx+1}"
+                print(f"[{completed}/{total}] {brand} => {line}")
 
-        if i < len(rows_to_process) - 1:
-            time.sleep(DELAY_BETWEEN_ROWS)
+            # Save every N rows so progress is not lost
+            if completed % SAVE_EVERY == 0 or completed == total:
+                df.to_csv(OUTPUT_CSV, index=False)
+                elapsed = round((time.time() - start_time) / 60, 1)
+                print(f"  -- Saved. {completed}/{total} done ({elapsed} min elapsed) --")
 
-    print(f"\nDone. Output saved to: {OUTPUT_CSV}")
+    df.to_csv(OUTPUT_CSV, index=False)
+    elapsed = round((time.time() - start_time) / 60, 1)
+    print(f"\nDone. {total} rows processed in {elapsed} min. Output saved to: {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":
