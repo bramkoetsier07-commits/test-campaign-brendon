@@ -1,0 +1,31 @@
+name: Run Fashion Personalizer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  personalize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run personalizer
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python personalizer.py
+
+      - name: Upload output CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads_output
+          path: leads_output.csv
