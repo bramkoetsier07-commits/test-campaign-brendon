@@ -4,7 +4,7 @@ import pandas as pd
 import anthropic
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INPUT_CSV = "leads.csv"          # CSV file you upload to the repo before running
+INPUT_CSV = "leads_brendon.csv"          # CSV file you upload to the repo before running
 OUTPUT_CSV = "leads_output.csv"  # Updated CSV written after the run
 COL_SCRAPE = "Scrape"            # Column S — scraped website text
 COL_OUTPUT = "Ps"                # Column T — personalized line output
