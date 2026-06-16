@@ -5,7 +5,7 @@ from openai import OpenAI, RateLimitError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INPUT_CSV = "leads.csv"          # CSV file you upload to the repo before running
+INPUT_CSV = "biglist.csv"          # CSV file you upload to the repo before running
 OUTPUT_CSV = "leads_output.csv"  # Updated CSV written after the run
 COL_SCRAPE = "Scrape"            # Column S — scraped website text
 COL_OUTPUT = "Ps"                # Column T — personalized line output
@@ -13,6 +13,7 @@ GPT_MODEL = "gpt-5-mini"         # Confirmed model string from OpenAI docs
 MAX_WORKERS = 10                 # Number of parallel API calls (safe for Tier 1+)
 MAX_RETRIES = 4                  # Retries per row if rate limited
 SAVE_EVERY = 50                  # Save progress to CSV every N rows completed
+TEST_MODE = True                 # True = only process first 10 rows. Set to False for the full list.
 # ────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a cold email personalization transformer.
@@ -87,6 +88,10 @@ def main():
     rows_to_process = df[
         (df[COL_SCRAPE] != "") & (df[COL_OUTPUT] == "")
     ].index.tolist()
+
+    if TEST_MODE:
+        rows_to_process = rows_to_process[:10]
+        print("TEST MODE: processing first 10 rows only.")
 
     total = len(rows_to_process)
     print(f"Rows to process: {total}")
